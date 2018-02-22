@@ -1,0 +1,130 @@
+AWSTemplateFormatVersion : "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: A serverless stack using API Gateway, Lambda, DynamoDB, S3 and SNS
+
+Parameters:
+  SNSEmailAddress:
+    Type: String
+    Default: [your_email_address]
+
+Resources:
+  DynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: N
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+  GenerateImageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: nodejs6.10
+      Handler: index.handler
+      CodeUri: ./lambda/generate-image/
+      Environment:
+        Variables:
+          S3BucketName: !Ref "S3Bucket"
+          DynamoDBTableName: !Ref "DynamoDBTable"
+      Events:
+        DynamoDBInsert:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt "DynamoDBTable.StreamArn"
+            StartingPosition: TRIM_HORIZON
+            BatchSize: 10
+      Policies:
+        -
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+              Resource: !GetAtt "DynamoDBTable.Arn"
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+              Resource: !Sub "arn:aws:s3:::${S3Bucket}/*"
+  ListDynamoDBFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: nodejs6.10
+      Handler: index.handler
+      CodeUri: ./lambda/list-dynamodb/
+      Environment:
+        Variables:
+          DynamoDBTableName: !Ref "DynamoDBTable"
+      Events:
+        GetApiEndpoint:
+          Type: Api
+          Properties:
+            Path: /items
+            Method: GET
+      Policies:
+        -
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Scan
+              Resource: !GetAtt "DynamoDBTable.Arn"
+  PublishSNSFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: nodejs6.10
+      Handler: index.handler
+      CodeUri: ./lambda/publish-sns/
+      Environment:
+        Variables:
+          SNSTopicARN: !Ref "SNSTopic"
+      Events:
+        S3ObjectCreated:
+          Type: S3
+          Properties:
+            Bucket: !Ref "S3Bucket"
+            Events: s3:ObjectCreated:*
+      Policies:
+        -
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref "SNSTopic"
+  PutDynamoDBFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: nodejs6.10
+      Handler: index.handler
+      CodeUri: ./lambda/put-dynamodb/
+      Environment:
+        Variables:
+          DynamoDBTableName: !Ref "DynamoDBTable"
+      Events:
+        GetApiEndpoint:
+          Type: Api
+          Properties:
+            Path: /item/{id}
+            Method: PUT
+      Policies:
+        -
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+              Resource: !GetAtt "DynamoDBTable.Arn"
+  S3Bucket:
+    Type: AWS::S3::Bucket
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint: !Ref "SNSEmailAddress"
+          Protocol: "email"

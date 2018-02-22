@@ -1,0 +1,214 @@
+service: serverless-application
+
+provider:
+  name: aws
+  runtime: nodejs6.10
+  stage: production
+  region: eu-west-1
+  versionFunctions: false
+
+custom:
+  s3bucketname: [unique_bucket_name]
+  snsemailaddress: [your_email_address]
+
+package:
+  excludeDevDependencies: false
+
+functions:
+  generateimage:
+    handler: lambda/generate-image/index.handler
+    environment:
+      S3BucketName: ${self:custom.s3bucketname}
+      DynamoDBTableName:
+        Ref: DynamoDBTable
+    events:
+      - stream:
+          type: dynamodb
+          batchSize: 10
+          startingPosition: TRIM_HORIZON
+          arn:
+            Fn::GetAtt: [DynamoDBTable, StreamArn]
+  listdynamodb:
+    role: ListDynamoDBRole
+    handler: lambda/list-dynamodb/index.handler
+    environment:
+      DynamoDBTableName:
+        Ref: DynamoDBTable
+    events:
+      - http:
+          path: /items
+          method: GET
+  publishsns:
+    role: PublishSNSRole
+    handler: lambda/publish-sns/index.handler
+    environment:
+      SNSTopicARN:
+        Ref: SNSTopic
+    events:
+      - s3:
+          bucket: ${self:custom.s3bucketname}
+          event: s3:ObjectCreated:*
+  putdynamodb:
+    role: PutDynamoDBRole
+    handler: lambda/put-dynamodb/index.handler
+    environment:
+      DynamoDBTableName:
+        Ref: DynamoDBTable
+    events:
+      - http:
+          path: /items/{id}
+          method: PUT
+
+resources:
+  Resources:
+    DynamoDBTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: N
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        ProvisionedThroughput:
+          ReadCapacityUnits: 1
+          WriteCapacityUnits: 1
+        StreamSpecification:
+          StreamViewType: NEW_IMAGE
+    GenerateImageRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: GenerateImageRole
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            -
+              Effect: Allow
+              Principal:
+                Service:
+                  - lambda.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        ManagedPolicyArns:
+          - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        Policies:
+          -
+            PolicyName: root
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - dynamodb:DescribeStream
+                    - dynamodb:GetRecords
+                    - dynamodb:GetShardIterator
+                    - dynamodb:ListStreams
+                  Resource:
+                    Fn::GetAtt: [DynamoDBTable, StreamArn]
+                - Effect: Allow
+                  Action:
+                    - s3:PutObject
+                  Resource:
+                    Fn::Sub: 'arn:aws:s3:::${self:custom.s3bucketname}/*'
+                - Effect: Allow
+                  Action:
+                    - dynamodb:PutItem
+                  Resource:
+                    Fn::GetAtt: [DynamoDBTable, Arn]
+    ListDynamoDBRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ListDynamoDBRole
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            -
+              Effect: Allow
+              Principal:
+                Service:
+                  - lambda.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        ManagedPolicyArns:
+          - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        Policies:
+          -
+            PolicyName: root
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - dynamodb:Scan
+                  Resource:
+                    Fn::GetAtt: [DynamoDBTable, Arn]
+    PublishSNSRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: PublishSNSRole
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            -
+              Effect: Allow
+              Principal:
+                Service:
+                  - lambda.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        ManagedPolicyArns:
+          - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        Policies:
+          -
+            PolicyName: root
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - sns:Publish
+                  Resource:
+                    Ref: SNSTopic
+    PublishsnsLambdaPermission:
+        Type: "AWS::Lambda::Permission"
+        Properties:
+          FunctionName:
+            Fn::GetAtt: [GenerateimageLambdaFunction, Arn]
+          Principal: "s3.amazonaws.com"
+          Action: "lambda:InvokeFunction"
+          SourceAccount:
+            Ref: AWS::AccountId
+          SourceArn: "arn:aws:s3:::${self:custom.s3bucketname}"
+    PutDynamoDBRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: PutDynamoDBRole
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            -
+              Effect: Allow
+              Principal:
+                Service:
+                  - lambda.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        ManagedPolicyArns:
+          - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        Policies:
+          -
+            PolicyName: root
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - dynamodb:PutItem
+                  Resource:
+                    Fn::GetAtt: [DynamoDBTable, Arn]
+    SNSTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        Subscription:
+          - Endpoint: ${self:custom.snsemailaddress}
+            Protocol: "email"
